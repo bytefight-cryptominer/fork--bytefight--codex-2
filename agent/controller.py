@@ -743,6 +743,201 @@ class PlayerController:
 
         return best_dir
 
+    def _bundle_unsafe_cells(self, board, parity, opp, danger):
+        unsafe = set(danger)
+        if not opp:
+            return unsafe
+
+        opp_r, opp_c = opp.loc.r, opp.loc.c
+        effective_stamina = opp.stamina
+        if board.cells[opp_r][opp_c].powerup:
+            effective_stamina = min(
+                opp.max_stamina,
+                effective_stamina + GameConstants.STAMINA_POWERUP_AMOUNT,
+            )
+
+        max_moves = min(4, self._max_regular_moves(effective_stamina))
+        frontier = {(opp_r, opp_c)}
+        seen = set(frontier)
+        for _ in range(max_moves):
+            next_frontier = set()
+            for fr, fc in frontier:
+                for d in Direction.cardinals():
+                    nl = Location(fr, fc) + d
+                    if board.oob(nl) or board.cells[nl.r][nl.c].is_wall:
+                        continue
+                    if (nl.r, nl.c) in seen:
+                        continue
+                    seen.add((nl.r, nl.c))
+                    unsafe.add((nl.r, nl.c))
+                    next_frontier.add((nl.r, nl.c))
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        beacon_cells = {
+            (r, c)
+            for r in range(len(board.cells))
+            for c in range(len(board.cells[0]))
+            if board.cells[r][c].beacon_parity == -parity
+        }
+        if beacon_cells and (((opp_r, opp_c) in beacon_cells) or any(cell in unsafe for cell in beacon_cells)):
+            for br, bc in beacon_cells:
+                unsafe.add((br, bc))
+                for d in Direction.cardinals():
+                    nl = Location(br, bc) + d
+                    if not board.oob(nl) and not board.cells[nl.r][nl.c].is_wall:
+                        unsafe.add((nl.r, nl.c))
+        return unsafe
+
+    def _bundle_target_counts(self, board, parity, target):
+        mine = 0
+        theirs = 0
+        for r, c in target:
+            owner = board.cells[r][c].owner_parity
+            if owner == parity:
+                mine += 1
+            elif owner == -parity:
+                theirs += 1
+        return mine, theirs
+
+    def _bundle_target_dist(self, loc, target):
+        return min(abs(loc.r - r) + abs(loc.c - c) for r, c in target)
+
+    def _should_optimize_bundle(self, board, me, parity, move_dir, target, threat_dist):
+        if not move_dir or not target:
+            return False
+        step = me.loc + move_dir
+        if board.oob(step) or board.cells[step.r][step.c].is_wall:
+            return False
+        if self._bundle_target_dist(step, target) > 1:
+            return False
+
+        my_count, opp_count = self._bundle_target_counts(board, parity, target)
+        threshold = math.ceil(len(target) * GameConstants.HILL_CONTROL_THRESHOLD)
+        contested = opp_count > 0 or my_count < threshold
+        if not contested:
+            return False
+        if threat_dist > 7 and (step.r, step.c) not in target:
+            return False
+        if me.stamina < 35:
+            return False
+        return True
+
+    def _simulate_bundle(self, board, parity, actions):
+        world = board.get_copy()
+        for action in actions:
+            if not world.apply_action(parity, action):
+                return None
+        return world
+
+    def _bundle_score(self, root_board, sim_board, parity, target, unsafe, action_count):
+        me = sim_board.get_player(parity)
+        opp = sim_board.get_player(-parity)
+        secure = sim_board.cells[me.loc.r][me.loc.c].owner_parity == parity
+        if (me.loc.r, me.loc.c) in unsafe and not secure:
+            return -1e9
+
+        root_my_target, root_opp_target = self._bundle_target_counts(root_board, parity, target)
+        my_target, opp_target = self._bundle_target_counts(sim_board, parity, target)
+        target_gain = (my_target - root_my_target) - (opp_target - root_opp_target)
+        hill_gain = len(me.controlled_hills) - len(opp.controlled_hills)
+        territory_gain = sim_board.get_territory_count(parity) - sim_board.get_territory_count(-parity)
+        dist = self._bundle_target_dist(me.loc, target)
+        opp_dist = abs(me.loc.r - opp.loc.r) + abs(me.loc.c - opp.loc.c)
+        stamina_weight = 1.0 if opp_dist <= 6 else 0.6
+        local = self._count_local(
+            sim_board,
+            me.loc,
+            parity,
+            len(sim_board.cells),
+            len(sim_board.cells[0]),
+        )
+
+        score = 65.0 * target_gain
+        score += 200.0 * hill_gain
+        score += 7.0 * territory_gain
+        score -= 16.0 * dist
+        score += stamina_weight * me.stamina
+        score += 3.0 * local
+        score -= 2.0 * action_count
+        if secure and (me.loc.r, me.loc.c) in unsafe:
+            score -= 8.0
+        return score
+
+    def _optimize_hill_bundle(self, board, me, opp, parity, rows, cols,
+                              move_dir, target, danger, near_opp,
+                              opp_r, opp_c, effective_safe_dist, chase_danger):
+        if not self._should_optimize_bundle(board, me, parity, move_dir, target, self._path_dist_to_opp):
+            return None
+
+        unsafe = self._bundle_unsafe_cells(board, parity, opp, danger)
+        baseline = self._build_actions(
+            board, me, parity, rows, cols,
+            opp_r, opp_c, danger, near_opp,
+            move_dir, target, effective_safe_dist, chase_danger,
+        )
+        candidates = [baseline]
+
+        step = me.loc + move_dir
+        step_cell = board.cells[step.r][step.c]
+        pre_targets = self._paintable(board, me.loc, parity, target)[:1]
+
+        variants = [([], MoveType.REGULAR)]
+        if pre_targets:
+            variants.append(([Action.Paint(pre_targets[0])], MoveType.REGULAR))
+        if step_cell.owner_parity == -parity and me.stamina >= 50:
+            variants.append(([], MoveType.ERASE))
+            if pre_targets:
+                variants.append(([Action.Paint(pre_targets[0])], MoveType.ERASE))
+
+        for prefix, move_type in variants:
+            base_actions = list(prefix)
+            base_actions.append(Action.Move(move_dir, move_type=move_type))
+            world = self._simulate_bundle(board, parity, base_actions)
+            if world is None:
+                continue
+            post_me = world.get_player(parity)
+            for t in self._paintable(world, post_me.loc, parity, target)[:2]:
+                plus_paint = base_actions + [Action.Paint(t)]
+                if self._simulate_bundle(board, parity, plus_paint) is not None:
+                    candidates.append(plus_paint)
+
+            if not near_opp:
+                next_dir = self._find_move(
+                    world,
+                    post_me,
+                    parity,
+                    rows,
+                    cols,
+                    opp_r,
+                    opp_c,
+                    danger,
+                    near_opp,
+                    target,
+                    from_loc=post_me.loc,
+                    effective_safe_dist=effective_safe_dist,
+                )
+                if next_dir:
+                    follow = base_actions + [Action.Move(next_dir)]
+                    if self._simulate_bundle(board, parity, follow) is not None:
+                        candidates.append(follow)
+
+        best_actions = None
+        best_score = -1e18
+        for candidate in candidates:
+            sim_board = self._simulate_bundle(board, parity, candidate)
+            if sim_board is None:
+                continue
+            score = self._bundle_score(board, sim_board, parity, target, unsafe, len(candidate))
+            if score > best_score:
+                best_score = score
+                best_actions = candidate
+
+        if best_actions is not None and best_actions != baseline and best_score >= 40.0:
+            return best_actions
+        return None
+
     def play(
         self,
         board: Board,
@@ -915,6 +1110,25 @@ class PlayerController:
             move_dir = candidates[0][1]
         else:
             move_dir = None
+
+        optimized_actions = self._optimize_hill_bundle(
+            board,
+            me,
+            opp,
+            player_parity,
+            rows,
+            cols,
+            move_dir,
+            target,
+            danger,
+            near_opp,
+            opp_r,
+            opp_c,
+            effective_safe_dist,
+            chase_danger,
+        )
+        if optimized_actions:
+            return optimized_actions
 
         return self._build_actions(board, me, player_parity, rows, cols,
                                    opp_r, opp_c, danger, near_opp,
