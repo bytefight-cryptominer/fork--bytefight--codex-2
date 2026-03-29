@@ -893,7 +893,11 @@ class PlayerController:
             max_candidates = 0
 
         # Use simulation if we have time and multiple candidates
-        if sim_turns > 0 and len(candidates) > 1:
+        confident_root = (
+            len(candidates) >= 2
+            and (candidates[0][0] - candidates[1][0]) >= 6.0
+        )
+        if sim_turns > 0 and len(candidates) > 1 and not confident_root:
             move_dir = self._simulate_candidates(board, me, player_parity,
                                                  candidates, opp,
                                                  sim_turns, max_candidates)
