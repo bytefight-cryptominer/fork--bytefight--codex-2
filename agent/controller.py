@@ -587,6 +587,21 @@ class PlayerController:
             if dist_to_opp <= effective_safe_dist and cell.owner_parity == -parity:
                 continue
 
+            seed_penalty = 0.0
+            if opp_r >= 0 and cell.owner_parity != parity:
+                nl_dist = abs(nl.r - opp_r) + abs(nl.c - opp_c)
+                contested = nl_dist <= effective_safe_dist + 1
+                objective = cell.powerup or (nl.r, nl.c) in self.hill_set
+                if contested:
+                    if objective:
+                        seed_penalty += 6.0
+                    elif cell.owner_parity == 0:
+                        seed_penalty += 2.0
+                    else:
+                        seed_penalty += 3.0
+                if (nl.r, nl.c) in danger:
+                    seed_penalty += 2.0 if objective else 1.0
+
             # BFS from this neighbor up to bfs_depth, distance-weighted scoring
             score = 0
             visited = {(start.r, start.c), (nl.r, nl.c)}
@@ -646,6 +661,8 @@ class PlayerController:
             # Powerup direction bias
             if powerup_dir and d == powerup_dir:
                 score += 0.5
+
+            score -= seed_penalty
 
             candidates.append((score, d))
 
