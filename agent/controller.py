@@ -11,7 +11,6 @@ from game import *
 # Direction offsets: UP(-1,0), DOWN(1,0), LEFT(0,-1), RIGHT(0,1)
 DR = [-1, 1, 0, 0]
 DC = [0, 0, -1, 1]
-DIR_BY_DELTA = {tuple(d.value): d for d in Direction.cardinals()}
 
 
 class LightBoard:
@@ -496,68 +495,6 @@ class PlayerController:
             next_cost += GameConstants.EXTRA_MOVE_COST
         return moves
 
-    def _effective_stamina_with_current_powerup(self, board, player):
-        stamina = player.stamina
-        cell = board.cells[player.loc.r][player.loc.c]
-        if cell.powerup:
-            stamina = min(player.max_stamina, stamina + GameConstants.STAMINA_POWERUP_AMOUNT)
-        return stamina
-
-    def _intercept_predicted_escape(self, board, me, opp, parity):
-        """Occupy a predicted opponent next step when we can turn it into a collision trap."""
-        if board.cells[opp.loc.r][opp.loc.c].owner_parity != -parity:
-            return None
-
-        lb = LightBoard.from_game_board(board, parity, me, opp)
-        ranked = lb._rank_directions_for(lb.opp_r, lb.opp_c, lb.my_r, lb.my_c, -1, depth=3, limit=2)
-        if not ranked:
-            return None
-        if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 1.5:
-            return None
-
-        trap_r = opp.loc.r + DR[ranked[0][1]]
-        trap_c = opp.loc.c + DC[ranked[0][1]]
-        trap = Location(trap_r, trap_c)
-        if board.oob(trap):
-            return None
-
-        trap_cell = board.cells[trap_r][trap_c]
-        if trap_cell.is_wall or trap_cell.owner_parity == -parity:
-            return None
-
-        me_stamina = self._effective_stamina_with_current_powerup(board, me)
-        max_moves = min(2, self._max_regular_moves(me_stamina))
-        path = self._shortest_path_dirs(board, me.loc.r, me.loc.c, trap_r, trap_c, max_moves)
-        if not path or len(path) > 2:
-            return None
-
-        path_locs = []
-        cur = me.loc
-        for move_dir in path:
-            cur = cur + move_dir
-            path_locs.append(cur)
-
-        for loc in path_locs[:-1]:
-            cell = board.cells[loc.r][loc.c]
-            if cell.is_wall or cell.owner_parity == -parity:
-                return None
-
-        if trap_cell.owner_parity == parity:
-            return [Action.Move(move_dir) for move_dir in path]
-
-        if trap_cell.owner_parity != 0 or not self._can_paint(trap_cell, parity):
-            return None
-
-        if len(path) == 1 and me_stamina >= 30:
-            return [Action.Paint(trap), Action.Move(path[0])]
-
-        if len(path) == 2 and me_stamina >= 25:
-            penultimate = path_locs[0]
-            if abs(penultimate.r - trap_r) + abs(penultimate.c - trap_c) == 1:
-                return [Action.Move(path[0]), Action.Paint(trap), Action.Move(path[1])]
-
-        return None
-
     def _shortest_path_dirs(self, board, start_r, start_c, goal_r, goal_c, max_depth):
         queue = deque([(start_r, start_c, 0)])
         parents = {(start_r, start_c): None}
@@ -934,10 +871,6 @@ class PlayerController:
             # Chase on NEUTRAL cell when very close (mover wins on neutral)
             elif opp_cell.owner_parity == 0 and dist_to_opp <= 2:
                 result = self._chase_neutral(board, me, opp, player_parity, rows, cols)
-                if result:
-                    return result
-            elif opp_cell.owner_parity == -player_parity and dist_to_opp <= 4:
-                result = self._intercept_predicted_escape(board, me, opp, player_parity)
                 if result:
                     return result
 
