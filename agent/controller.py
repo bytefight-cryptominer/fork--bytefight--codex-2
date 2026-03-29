@@ -1021,6 +1021,12 @@ class PlayerController:
         if not board.oob(step):
             step_cell = board.cells[step.r][step.c]
 
+            if self._should_clear_enemy_beacon(board, step, parity):
+                if step_cell.owner_parity == -parity and stamina >= 50:
+                    return [Action.Move(move_dir, move_type=MoveType.ERASE, place_beacon=True)]
+                if step_cell.owner_parity != -parity:
+                    return [Action.Move(move_dir, place_beacon=True)]
+
             # SMARTER COLLISION SAFETY: only avoid ENEMY cells near opponent
             # Neutral cells are SAFE (we win collision as the mover)
             if dist_to_opp <= effective_safe_dist and step_cell.owner_parity == -parity:
@@ -1185,6 +1191,7 @@ class PlayerController:
         return actions
 
     def _paintable(self, board, loc, parity, target):
+        enemy_beacons = []
         hill = []
         normal = []
         for d in Direction.cardinals():
@@ -1194,6 +1201,9 @@ class PlayerController:
             cell = board.cells[t.r][t.c]
             if not self._can_paint(cell, parity):
                 continue
+            if cell.beacon_parity == -parity:
+                enemy_beacons.append(t)
+                continue
             is_target = (t.r, t.c) in target
             is_hill = (t.r, t.c) in self.hill_set
             if is_target and cell.owner_parity != parity:
@@ -1202,7 +1212,7 @@ class PlayerController:
                 normal.append(t)
             # NO reinforcement painting - don't waste stamina on owned cells
         # Deterministic ordering: hills first (sorted by distance to center for consistency)
-        return hill + normal
+        return enemy_beacons + hill + normal
 
     def _paint_priority(self, loc, cell, parity):
         is_hill = (loc.r, loc.c) in self.hill_set
@@ -1548,7 +1558,7 @@ class PlayerController:
         return None
 
     def _can_paint(self, cell, parity):
-        if cell.is_wall or cell.beacon_parity != 0:
+        if cell.is_wall or cell.beacon_parity == parity:
             return False
         if cell.owner_parity != 0 and cell.owner_parity != parity:
             return False
@@ -1558,6 +1568,41 @@ class PlayerController:
             return abs(cell.paint_value) < GameConstants.MAX_PAINT_VALUE
         except Exception:
             return abs(cell.paint_value) < 4
+
+    def _beacon_window_stats(self, board, loc, parity):
+        friendly = 0
+        weak_loss = 0
+        hill_weak_loss = 0
+        valid = 0
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                r = loc.r + dr
+                c = loc.c + dc
+                if r < 0 or c < 0 or r >= len(board.cells) or c >= len(board.cells[0]):
+                    continue
+                cell = board.cells[r][c]
+                if cell.is_wall:
+                    continue
+                valid += 1
+                if cell.owner_parity != parity:
+                    continue
+                friendly += 1
+                if abs(cell.paint_value) <= 1:
+                    weak_loss += 1
+                    if cell.hill_id:
+                        hill_weak_loss += 1
+        required = math.ceil(
+            valid * GameConstants.BEACON_REQUIREMENT_Q
+            / (GameConstants.BEACON_WINDOW_SIZE_P ** 2)
+        )
+        return friendly, weak_loss, hill_weak_loss, required
+
+    def _should_clear_enemy_beacon(self, board, loc, parity):
+        cell = board.cells[loc.r][loc.c]
+        if cell.beacon_parity != -parity:
+            return False
+        friendly, weak_loss, hill_weak_loss, required = self._beacon_window_stats(board, loc, parity)
+        return friendly >= required and weak_loss <= 2 and hill_weak_loss == 0
 
     def _best_local_move(self, board, me, parity, rows, cols, opp_r, opp_c):
         best_dir = None
