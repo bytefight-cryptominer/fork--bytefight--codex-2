@@ -694,6 +694,15 @@ class PlayerController:
         for _, cand_dir in to_eval:
             # Create LightBoard snapshot
             lb = LightBoard.from_game_board(board, parity, me, opp)
+            stamina = lb.my_stamina
+
+            # Approximate the real controller's paint-before-move behavior.
+            for di in range(4):
+                pr = lb.my_r + DR[di]
+                pc = lb.my_c + DC[di]
+                if lb._valid(pr, pc) and lb.paint[pr][pc] == 0 and stamina >= 30:
+                    lb._paint_cell(pr, pc, 1)
+                    stamina -= 15
 
             # Apply the candidate's first move direction
             dr_val = cand_dir.value[0]
@@ -708,7 +717,6 @@ class PlayerController:
             lb.my_c = nc
 
             # Paint from new position (simulate the initial paint actions)
-            stamina = lb.my_stamina
             for di in range(4):
                 pr, pc = nr + DR[di], nc + DC[di]
                 if lb._valid(pr, pc) and lb.paint[pr][pc] == 0:
