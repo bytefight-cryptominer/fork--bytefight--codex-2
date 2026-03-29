@@ -573,14 +573,13 @@ class PlayerController:
 
         dist_to_opp = self._path_dist_to_opp
 
-        # If we have a target hill, use direct BFS to find it first
+        target_dir = None
+        # If we have a target hill, keep the direct BFS move as a strong root
+        # candidate, but still let rollout compare it against expansion moves.
         if target:
-            direct = self._bfs_to_target(board, start, parity, rows, cols,
-                                         opp_r, opp_c, danger, near_opp, target,
-                                         dist_to_opp, effective_safe_dist, me)
-            if direct:
-                # Target hill BFS gives a single strong direction; return it as sole candidate
-                return [(999.0, direct)]
+            target_dir = self._bfs_to_target(board, start, parity, rows, cols,
+                                             opp_r, opp_c, danger, near_opp, target,
+                                             dist_to_opp, effective_safe_dist, me)
 
         # SCORED BFS: for each valid initial direction, count unpainted cells within depth
         dirs = list(Direction.cardinals())
@@ -661,6 +660,16 @@ class PlayerController:
                 score += 0.5
 
             candidates.append((score, d))
+
+        if target_dir:
+            boosted = False
+            for idx, (score, cand_dir) in enumerate(candidates):
+                if cand_dir == target_dir:
+                    candidates[idx] = (score + 20.0, cand_dir)
+                    boosted = True
+                    break
+            if not boosted:
+                candidates.append((20.0, target_dir))
 
         if not candidates:
             # Fallback: any unpainted via regular BFS
