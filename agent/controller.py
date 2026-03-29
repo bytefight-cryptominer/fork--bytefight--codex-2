@@ -310,19 +310,32 @@ class LightBoard:
     def evaluate(self):
         """
         Score the position from 'my' perspective.
-        territory diff * 2.0 + hill control * 100.0
+        Territory diff + capture-aware hill scoring.
         """
-        my_hills = 0
-        opp_hills = 0
+        score = (self.my_territory - self.opp_territory) * 2.0
+
+        # Per-hill capture-aware scoring
+        hill_control = {}  # hid -> [my_count, opp_count, total]
         for (hr, hc) in self.hill_set:
+            hid = self.hill_ids[hr][hc]
+            if hid not in hill_control:
+                hill_control[hid] = [0, 0, 0]
+            hill_control[hid][2] += 1
             p = self.paint[hr][hc]
             if p == 1:
-                my_hills += 1
+                hill_control[hid][0] += 1
             elif p == -1:
-                opp_hills += 1
+                hill_control[hid][1] += 1
 
-        score = (self.my_territory - self.opp_territory) * 2.0
-        score += my_hills * 100.0 - opp_hills * 100.0
+        for hid, (my, opp, total) in hill_control.items():
+            threshold = (total + 1) // 2
+            if my >= threshold and my > opp:
+                score += 300  # captured hill: +40 max stamina equivalent
+            elif opp >= threshold and opp > my:
+                score -= 300
+            # Individual cell control on uncaptured hills
+            score += (my - opp) * 60
+
         return score
 
 
