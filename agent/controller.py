@@ -720,10 +720,7 @@ class PlayerController:
 
             # Simulate subsequent turns
             for _ in range(sim_turns - 1):
-                if abs(lb.my_r - lb.opp_r) + abs(lb.my_c - lb.opp_c) <= 8:
-                    lb.simulate_storm_turn()
-                else:
-                    lb._simulate_side_turn(1)
+                lb.simulate_storm_turn()
 
             # Evaluate
             ev = lb.evaluate()
