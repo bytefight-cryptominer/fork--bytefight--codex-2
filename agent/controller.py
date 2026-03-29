@@ -903,10 +903,18 @@ class PlayerController:
         else:
             move_dir = None
 
-        return self._build_actions(board, me, player_parity, rows, cols,
-                                   opp_r, opp_c, danger, near_opp,
-                                   move_dir, target, effective_safe_dist,
-                                   chase_danger)
+        base_actions = self._build_actions(board, me, player_parity, rows, cols,
+                                           opp_r, opp_c, danger, near_opp,
+                                           move_dir, target, effective_safe_dist,
+                                           chase_danger)
+        return self._forecast_beacon_override(
+            board,
+            me,
+            player_parity,
+            base_actions,
+            target,
+            time_left(),
+        )
 
     def _bfs_powerup(self, board, me, parity, danger, near_opp, max_dist=4):
         """BFS to find nearest powerup within max_dist steps."""
@@ -1558,6 +1566,123 @@ class PlayerController:
             return abs(cell.paint_value) < GameConstants.MAX_PAINT_VALUE
         except Exception:
             return abs(cell.paint_value) < 4
+
+    def _clone_actions(self, actions):
+        cloned = []
+        for action in actions:
+            if isinstance(action, Action.Move):
+                cloned.append(
+                    Action.Move(
+                        action.direction,
+                        move_type=action.move_type,
+                        place_beacon=action.place_beacon,
+                        beacon_target=action.beacon_target,
+                    )
+                )
+            else:
+                cloned.append(Action.Paint(action.location))
+        return cloned
+
+    def _hill_control_score(self, board, parity):
+        score = 0.0
+        for hill in board.hills.values():
+            total = len(hill.cells)
+            threshold = math.ceil(total * GameConstants.HILL_CONTROL_THRESHOLD)
+            my_cells = 0
+            opp_cells = 0
+            for loc in hill.cells:
+                owner = board.cells[loc.r][loc.c].owner_parity
+                if owner == parity:
+                    my_cells += 1
+                elif owner == -parity:
+                    opp_cells += 1
+            if my_cells >= threshold and my_cells > opp_cells:
+                score += 320.0
+            elif opp_cells >= threshold and opp_cells > my_cells:
+                score -= 320.0
+            score += (my_cells - opp_cells) * 55.0
+        return score
+
+    def _forecast_turn_score(self, board, parity):
+        rows = len(board.cells)
+        cols = len(board.cells[0])
+        me = board.get_player(parity)
+        opp = board.get_player(-parity)
+        score = (board.get_territory_count(parity) - board.get_territory_count(-parity)) * 2.0
+        score += self._hill_control_score(board, parity)
+        score += (me.max_stamina - opp.max_stamina) * 3.0
+        score += (me.stamina - opp.stamina) * 0.4
+        score += self._count_local(board, me.loc, parity, rows, cols) * 2.0
+        score -= self._count_local(board, opp.loc, -parity, rows, cols) * 1.5
+        my_cell = board.cells[me.loc.r][me.loc.c]
+        if my_cell.owner_parity != parity:
+            score -= 25.0
+        elif my_cell.hill_id:
+            score += 15.0
+        return score
+
+    def _forecast_beacon_override(self, board, me, parity, base_actions, target, time_left_value):
+        if time_left_value < 20:
+            return base_actions
+        action_list = list(base_actions)
+        first_move_idx = None
+        for idx, action in enumerate(action_list):
+            if isinstance(action, Action.Move):
+                first_move_idx = idx
+                break
+        if first_move_idx is None:
+            return action_list
+
+        first_move = action_list[first_move_idx]
+        if first_move.direction is None or first_move.move_type == MoveType.BEACON_TRAVEL:
+            return action_list
+
+        step = me.loc + first_move.direction
+        if board.oob(step) or board.cells[step.r][step.c].is_wall:
+            return action_list
+
+        step_cell = board.cells[step.r][step.c]
+        candidates = []
+
+        # Candidate 1: if we are already attacking an enemy beacon cell, only clear it
+        # when an exact turn forecast says it beats the normal line.
+        if step_cell.beacon_parity == -parity:
+            if first_move.move_type == MoveType.ERASE:
+                cand = self._clone_actions(action_list)
+                cand[first_move_idx].place_beacon = True
+                candidates.append(cand)
+            elif me.stamina >= 50:
+                cand = self._clone_actions(action_list)
+                cand[first_move_idx].move_type = MoveType.ERASE
+                cand[first_move_idx].place_beacon = True
+                candidates.append(cand)
+
+        # Candidate 2: fortify an already-targeted hill step only if the forecast
+        # sees a clear tactical gain after sacrificing the 3x3 paint.
+        if step_cell.hill_id and (step.r, step.c) in target and step_cell.owner_parity != -parity:
+            cand = self._clone_actions(action_list)
+            cand[first_move_idx].place_beacon = True
+            candidates.append(cand)
+
+        if not candidates:
+            return action_list
+
+        base_board, ok = board.forecast_turn(parity, action_list)
+        if not ok:
+            return action_list
+        best_actions = action_list
+        best_score = self._forecast_turn_score(base_board, parity)
+
+        for cand in candidates:
+            cand_board, ok = board.forecast_turn(parity, cand)
+            if not ok:
+                continue
+            cand_score = self._forecast_turn_score(cand_board, parity)
+            if cand_score > best_score + 45.0:
+                best_score = cand_score
+                best_actions = cand
+
+        return best_actions
 
     def _best_local_move(self, board, me, parity, rows, cols, opp_r, opp_c):
         best_dir = None
