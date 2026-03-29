@@ -887,7 +887,7 @@ class PlayerController:
         tl = time_left()
         if tl > 10:
             sim_turns = 5
-            max_candidates = 4
+            max_candidates = 5
         else:
             sim_turns = 0
             max_candidates = 0
