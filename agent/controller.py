@@ -495,6 +495,35 @@ class PlayerController:
             next_cost += GameConstants.EXTRA_MOVE_COST
         return moves
 
+    def _effective_stamina_with_current_powerup(self, board, player):
+        stamina = player.stamina
+        cell = board.cells[player.loc.r][player.loc.c]
+        if cell.powerup:
+            stamina = min(player.max_stamina, stamina + GameConstants.STAMINA_POWERUP_AMOUNT)
+        return stamina
+
+    def _opponent_can_exact_collide(self, board, target_loc, my_parity):
+        try:
+            opponent = board.get_player(-my_parity)
+        except Exception:
+            return False
+
+        cell = board.cells[target_loc.r][target_loc.c]
+        if cell.owner_parity == my_parity:
+            return False
+
+        opp_stamina = self._effective_stamina_with_current_powerup(board, opponent)
+        max_moves = self._max_regular_moves(opp_stamina)
+        path = self._shortest_path_dirs(
+            board,
+            opponent.loc.r,
+            opponent.loc.c,
+            target_loc.r,
+            target_loc.c,
+            max_moves,
+        )
+        return path is not None
+
     def _shortest_path_dirs(self, board, start_r, start_c, goal_r, goal_c, max_depth):
         queue = deque([(start_r, start_c, 0)])
         parents = {(start_r, start_c): None}
@@ -1110,8 +1139,14 @@ class PlayerController:
                     nc = board.cells[next_step.r][next_step.c]
                     if (next_step.r, next_step.c) in danger and nc.owner_parity == -parity:
                         return actions  # skip dangerous
+                    prepaint_step2 = self._can_paint(nc, parity) and stamina >= 40
+                    if ((next_step.r, next_step.c) not in self.hill_set
+                            and nc.owner_parity != parity
+                            and not prepaint_step2
+                            and self._opponent_can_exact_collide(board, next_step, parity)):
+                        return actions
 
-                    if self._can_paint(nc, parity) and stamina >= 40:
+                    if prepaint_step2:
                         actions.append(Action.Paint(next_step))
                         painted.add((next_step.r, next_step.c))
                         stamina -= 15
@@ -1143,7 +1178,13 @@ class PlayerController:
                                 c3 = board.cells[step3.r][step3.c]
                                 if (step3.r, step3.c) in danger and c3.owner_parity == -parity:
                                     return actions
-                                if self._can_paint(c3, parity) and stamina >= 40:
+                                prepaint_step3 = self._can_paint(c3, parity) and stamina >= 40
+                                if ((step3.r, step3.c) not in self.hill_set
+                                        and c3.owner_parity != parity
+                                        and not prepaint_step3
+                                        and self._opponent_can_exact_collide(board, step3, parity)):
+                                    return actions
+                                if prepaint_step3:
                                     actions.append(Action.Paint(step3))
                                     painted.add((step3.r, step3.c))
                                     stamina -= 15
@@ -1163,7 +1204,13 @@ class PlayerController:
                                             c4 = board.cells[step4.r][step4.c]
                                             if (step4.r, step4.c) in danger and c4.owner_parity == -parity:
                                                 return actions
-                                            if self._can_paint(c4, parity) and stamina >= 55:
+                                            prepaint_step4 = self._can_paint(c4, parity) and stamina >= 55
+                                            if ((step4.r, step4.c) not in self.hill_set
+                                                    and c4.owner_parity != parity
+                                                    and not prepaint_step4
+                                                    and self._opponent_can_exact_collide(board, step4, parity)):
+                                                return actions
+                                            if prepaint_step4:
                                                 actions.append(Action.Paint(step4))
                                                 painted.add((step4.r, step4.c))
                                                 stamina -= 15
