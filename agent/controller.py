@@ -138,13 +138,14 @@ class LightBoard:
             self.opp_territory += 1
         return True
 
-    def _rank_directions_for(self, r, c, opp_r, opp_c, owner, depth=3, limit=None):
+    def _best_direction_for(self, r, c, opp_r, opp_c, owner, depth=3):
         """
-        Rank valid directions for either side using the rollout BFS heuristic.
-        Returns a list of (score, di), highest score first.
+        Simple BFS scoring to pick best direction for either side.
+        Scores unpainted/enemy cells within depth, returns best (di index, score).
         """
         enemy = -owner
-        ranked = []
+        best_di = -1
+        best_score = -1
 
         for di in range(4):
             nr, nc = r + DR[di], c + DC[di]
@@ -192,19 +193,11 @@ class LightBoard:
                 dist = abs(nr - opp_r) + abs(nc - opp_c)
                 score += dist * 0.08
 
-            ranked.append((score, di))
+            if score > best_score:
+                best_score = score
+                best_di = di
 
-        ranked.sort(key=lambda item: -item[0])
-        if limit is not None:
-            return ranked[:limit]
-        return ranked
-
-    def _best_direction_for(self, r, c, opp_r, opp_c, owner, depth=3):
-        ranked = self._rank_directions_for(r, c, opp_r, opp_c, owner, depth=depth, limit=1)
-        if ranked:
-            score, di = ranked[0]
-            return di, score
-        return -1, -1
+        return best_di, best_score
 
     def _apply_regen_for(self, owner):
         """Approximate stamina regen: base 5 + adj*2 + territory/8, capped at 100."""
@@ -231,7 +224,7 @@ class LightBoard:
         else:
             self.opp_stamina = stamina
 
-    def _simulate_side_turn(self, owner, forced_di=None):
+    def _simulate_side_turn(self, owner):
         """
         Simulate one simplified turn for either side.
         """
@@ -253,14 +246,7 @@ class LightBoard:
                     stamina -= 15
 
         # Find best direction
-        if forced_di is not None:
-            nr, nc = r + DR[forced_di], c + DC[forced_di]
-            if self._valid(nr, nc):
-                best_di = forced_di
-            else:
-                best_di, _ = self._best_direction_for(r, c, opp_r, opp_c, owner, depth=3)
-        else:
-            best_di, _ = self._best_direction_for(r, c, opp_r, opp_c, owner, depth=3)
+        best_di, _ = self._best_direction_for(r, c, opp_r, opp_c, owner, depth=3)
         if best_di < 0:
             if owner == 1:
                 self.my_stamina = stamina
@@ -705,7 +691,7 @@ class PlayerController:
         best_dir = to_eval[0][1]  # default: highest scoring from BFS
         best_eval = -999999.0
 
-        for idx, (_, cand_dir) in enumerate(to_eval):
+        for _, cand_dir in to_eval:
             # Create LightBoard snapshot
             lb = LightBoard.from_game_board(board, parity, me, opp)
 
@@ -732,34 +718,12 @@ class PlayerController:
             lb.my_stamina = stamina
             lb._apply_regen_for(1)
 
-            if sim_turns > 1 and opp and idx < 2:
-                opp_branches = lb._rank_directions_for(
-                    lb.opp_r,
-                    lb.opp_c,
-                    lb.my_r,
-                    lb.my_c,
-                    -1,
-                    depth=2,
-                    limit=2,
-                )
-                if opp_branches:
-                    branch_evals = []
-                    for _, opp_di in opp_branches:
-                        branch_lb = lb.copy()
-                        branch_lb._simulate_side_turn(-1, forced_di=opp_di)
-                        branch_lb._simulate_side_turn(1)
-                        for _ in range(sim_turns - 2):
-                            branch_lb.simulate_storm_turn()
-                        branch_evals.append(branch_lb.evaluate())
-                    ev = min(branch_evals)
-                else:
-                    ev = lb.evaluate()
-            else:
-                # Simulate subsequent turns
-                for _ in range(sim_turns - 1):
-                    lb.simulate_storm_turn()
-                ev = lb.evaluate()
+            # Simulate subsequent turns
+            for _ in range(sim_turns - 1):
+                lb.simulate_storm_turn()
 
+            # Evaluate
+            ev = lb.evaluate()
             if ev > best_eval:
                 best_eval = ev
                 best_dir = cand_dir
