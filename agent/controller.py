@@ -743,6 +743,185 @@ class PlayerController:
 
         return best_dir
 
+    def _build_unsafe_overlay_cells(self, board, parity, opp, danger):
+        unsafe = set(danger)
+        if not opp:
+            return unsafe
+
+        opp_r, opp_c = opp.loc.r, opp.loc.c
+        start_cell = board.cells[opp_r][opp_c]
+        effective_stamina = opp.stamina
+        if start_cell.powerup:
+            effective_stamina = min(
+                opp.max_stamina,
+                effective_stamina + GameConstants.STAMINA_POWERUP_AMOUNT,
+            )
+        max_moves = min(4, self._max_regular_moves(effective_stamina))
+        frontier = {(opp_r, opp_c)}
+        seen = set(frontier)
+        for _ in range(max_moves):
+            next_frontier = set()
+            for fr, fc in frontier:
+                for d in Direction.cardinals():
+                    nl = Location(fr, fc) + d
+                    if board.oob(nl) or board.cells[nl.r][nl.c].is_wall:
+                        continue
+                    if (nl.r, nl.c) in seen:
+                        continue
+                    seen.add((nl.r, nl.c))
+                    unsafe.add((nl.r, nl.c))
+                    next_frontier.add((nl.r, nl.c))
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        beacon_cells = {
+            (r, c)
+            for r in range(len(board.cells))
+            for c in range(len(board.cells[0]))
+            if board.cells[r][c].beacon_parity == -parity
+        }
+        if beacon_cells and (((opp_r, opp_c) in beacon_cells) or any(cell in unsafe for cell in beacon_cells)):
+            for br, bc in beacon_cells:
+                unsafe.add((br, bc))
+                beacon_frontier = {(br, bc)}
+                beacon_seen = {(br, bc)}
+                for _ in range(2):
+                    next_frontier = set()
+                    for fr, fc in beacon_frontier:
+                        for d in Direction.cardinals():
+                            nl = Location(fr, fc) + d
+                            if board.oob(nl) or board.cells[nl.r][nl.c].is_wall:
+                                continue
+                            if (nl.r, nl.c) in beacon_seen:
+                                continue
+                            beacon_seen.add((nl.r, nl.c))
+                            unsafe.add((nl.r, nl.c))
+                            next_frontier.add((nl.r, nl.c))
+                    beacon_frontier = next_frontier
+                    if not beacon_frontier:
+                        break
+
+        return unsafe
+
+    def _overlay_target_counts(self, board, parity, target):
+        mine = 0
+        theirs = 0
+        for r, c in target:
+            owner = board.cells[r][c].owner_parity
+            if owner == parity:
+                mine += 1
+            elif owner == -parity:
+                theirs += 1
+        return mine, theirs
+
+    def _overlay_target_dist(self, loc, target):
+        return min(abs(loc.r - r) + abs(loc.c - c) for r, c in target)
+
+    def _overlay_candidate_actions(self, board, parity, target):
+        me = board.get_player(parity)
+        current_dist = self._overlay_target_dist(me.loc, target)
+        actions = []
+
+        for d in Direction.cardinals():
+            nl = me.loc + d
+            if board.oob(nl) or board.cells[nl.r][nl.c].is_wall:
+                continue
+            cell = board.cells[nl.r][nl.c]
+            next_dist = self._overlay_target_dist(nl, target)
+            score = (current_dist - next_dist) * 18.0
+            if (nl.r, nl.c) in target:
+                score += 18.0
+            if cell.owner_parity == 0:
+                score += 6.0
+            elif cell.owner_parity == -parity:
+                score += 10.0
+            actions.append((score, Action.Move(d)))
+            if cell.owner_parity == -parity:
+                erase_score = score + 14.0
+                if (nl.r, nl.c) in target:
+                    erase_score += 10.0
+                actions.append((erase_score, Action.Move(d, move_type=MoveType.ERASE)))
+
+        if board.moves_this_turn > 0:
+            for t in self._paintable(board, me.loc, parity, target)[:2]:
+                cell = board.cells[t.r][t.c]
+                score = 12.0 if (t.r, t.c) in target else 5.0
+                if cell.owner_parity == parity:
+                    score -= 2.0
+                actions.append((score, Action.Paint(t)))
+
+        actions.sort(key=lambda item: -item[0])
+        return actions[:5]
+
+    def _score_overlay_state(self, root_board, sim_board, parity, target, unsafe):
+        me = sim_board.get_player(parity)
+        opp = sim_board.get_player(-parity)
+        secure = sim_board.cells[me.loc.r][me.loc.c].owner_parity == parity
+        if (me.loc.r, me.loc.c) in unsafe and not secure:
+            return -1e9
+
+        root_my_target, root_opp_target = self._overlay_target_counts(root_board, parity, target)
+        my_target, opp_target = self._overlay_target_counts(sim_board, parity, target)
+        target_gain = (my_target - root_my_target) - (opp_target - root_opp_target)
+        hill_gain = len(me.controlled_hills) - len(opp.controlled_hills)
+        territory_gain = sim_board.get_territory_count(parity) - sim_board.get_territory_count(-parity)
+        dist = self._overlay_target_dist(me.loc, target)
+        opp_dist = abs(me.loc.r - opp.loc.r) + abs(me.loc.c - opp.loc.c)
+        stamina_weight = 1.0 if opp_dist <= 6 else 0.6
+
+        score = 55.0 * target_gain
+        score += 180.0 * hill_gain
+        score += 6.0 * territory_gain
+        score -= 14.0 * dist
+        score += stamina_weight * me.stamina
+        if secure and (me.loc.r, me.loc.c) in unsafe:
+            score -= 10.0
+        return score
+
+    def _hill_tactical_overlay(self, board, me, opp, parity, target, danger, threat_dist, time_left_now):
+        if not target:
+            return None
+        if self._overlay_target_dist(me.loc, target) > 3:
+            return None
+        if threat_dist > 8:
+            return None
+        if me.stamina < 25:
+            return None
+
+        unsafe = self._build_unsafe_overlay_cells(board, parity, opp, danger)
+        deadline = time_module.perf_counter() + min(0.008, max(0.003, time_left_now / 20000.0))
+        beam = [(board.get_copy(), [], -1e18)]
+        best_actions = None
+        best_score = -1e18
+
+        for _ in range(4):
+            if time_module.perf_counter() >= deadline:
+                break
+            next_beam = []
+            for sim_board, actions, _ in beam:
+                if time_module.perf_counter() >= deadline:
+                    break
+                for _, action in self._overlay_candidate_actions(sim_board, parity, target):
+                    copy = sim_board.get_copy()
+                    if not copy.apply_action(parity, action):
+                        continue
+                    new_actions = actions + [action]
+                    score = self._score_overlay_state(board, copy, parity, target, unsafe)
+                    if score > best_score:
+                        best_score = score
+                        best_actions = new_actions
+                    if len(new_actions) < 4:
+                        next_beam.append((copy, new_actions, score))
+            if not next_beam:
+                break
+            next_beam.sort(key=lambda item: -item[2])
+            beam = next_beam[:8]
+
+        if best_score >= 25.0 and best_actions:
+            return best_actions
+        return None
+
     def play(
         self,
         board: Board,
@@ -889,6 +1068,18 @@ class PlayerController:
 
         # === SIMULATION LAYER: evaluate candidate directions ===
         target = self._find_target_hill(board, me, player_parity, opp_r, opp_c)
+        overlay_actions = self._hill_tactical_overlay(
+            board,
+            me,
+            opp,
+            player_parity,
+            target,
+            danger,
+            dist_to_opp,
+            time_left(),
+        )
+        if overlay_actions:
+            return overlay_actions
 
         # Get candidate directions with scores
         candidates = self._find_move_candidates(board, me, player_parity, rows, cols,
