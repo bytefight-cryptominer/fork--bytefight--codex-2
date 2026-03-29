@@ -508,34 +508,6 @@ class PlayerController:
             next_cost += GameConstants.EXTRA_MOVE_COST
         return moves
 
-    def _shortest_distance_map(self, board, start_r, start_c, max_depth):
-        dist = {(start_r, start_c): 0}
-        queue = deque([(start_r, start_c, 0)])
-        while queue:
-            r, c, depth = queue.popleft()
-            if depth >= max_depth:
-                continue
-            for d in Direction.cardinals():
-                nl = Location(r, c) + d
-                if board.oob(nl) or board.cells[nl.r][nl.c].is_wall:
-                    continue
-                if (nl.r, nl.c) in dist:
-                    continue
-                dist[(nl.r, nl.c)] = depth + 1
-                queue.append((nl.r, nl.c, depth + 1))
-        return dist
-
-    def _owner_after_regular_move(self, cell, parity):
-        paint_value = cell.paint_value
-        if paint_value == 0:
-            return 0
-        if (paint_value > 0) == (parity > 0):
-            return parity
-        next_value = paint_value + parity
-        if next_value == 0:
-            return 0
-        return -parity
-
     def _shortest_path_dirs(self, board, start_r, start_c, goal_r, goal_c, max_depth):
         queue = deque([(start_r, start_c, 0)])
         parents = {(start_r, start_c): None}
@@ -923,32 +895,6 @@ class PlayerController:
                                                 opp_r, opp_c, danger, near_opp, target,
                                                 effective_safe_dist=effective_safe_dist,
                                                 powerup_dir=powerup_dir)
-
-        if opp and len(candidates) > 1:
-            opp_effective_stamina = opp.stamina
-            if board.cells[opp_r][opp_c].powerup:
-                opp_effective_stamina = min(
-                    opp.max_stamina,
-                    opp.stamina + GameConstants.STAMINA_POWERUP_AMOUNT,
-                )
-            opp_kill_moves = self._max_regular_moves(opp_effective_stamina)
-            opp_reach = self._shortest_distance_map(board, opp_r, opp_c, opp_kill_moves)
-            safe_candidates = []
-            for score, cand_dir in candidates:
-                step = me.loc + cand_dir
-                if board.oob(step):
-                    continue
-                step_cell = board.cells[step.r][step.c]
-                if (
-                    (step.r, step.c) in opp_reach and
-                    self._owner_after_regular_move(step_cell, player_parity) != player_parity and
-                    not step_cell.powerup and
-                    (step.r, step.c) not in self.hill_set
-                ):
-                    continue
-                safe_candidates.append((score, cand_dir))
-            if safe_candidates:
-                candidates = safe_candidates
 
         # Determine simulation budget based on time remaining
         tl = time_left()
