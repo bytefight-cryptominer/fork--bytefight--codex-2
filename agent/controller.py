@@ -859,6 +859,16 @@ class PlayerController:
             return powerup_action
 
         powerup_dir = self._bfs_powerup(board, me, player_parity, danger, near_opp, max_dist=4)
+        if powerup_dir is None and self.map_tier == 'large' and not near_opp:
+            powerup_dir = self._bfs_scheduled_powerup(
+                board,
+                me,
+                player_parity,
+                danger,
+                near_opp,
+                max_rounds=2,
+                max_dist=6,
+            )
 
         # === AGGRESSIVE COLLISION HUNTING ===
         if opp and dist_to_opp <= 5:
@@ -941,6 +951,55 @@ class PlayerController:
                     return first_dir
                 queue.append((nl, first_dir, dist + 1))
         return None
+
+    def _bfs_scheduled_powerup(self, board, me, parity, danger, near_opp, max_rounds=2, max_dist=6):
+        """Bias movement toward nearby powerups that are about to spawn."""
+        schedule = getattr(board, "powerup_schedule", None)
+        if not schedule:
+            return None
+
+        current_round = getattr(board, "current_round", 0)
+        event_pointer = getattr(board, "event_pointer", 0)
+        best_dir = None
+        best_key = None
+
+        for idx in range(event_pointer, len(schedule)):
+            future = schedule[idx]
+            rounds_until = future.round_num - current_round
+            if rounds_until < 1:
+                continue
+            if rounds_until > max_rounds:
+                break
+
+            path = self._shortest_path_dirs(
+                board,
+                me.loc.r,
+                me.loc.c,
+                future.location.r,
+                future.location.c,
+                max_dist,
+            )
+            if not path:
+                continue
+            if len(path) > rounds_until + 2:
+                continue
+
+            first_dir = path[0]
+            step = me.loc + first_dir
+            if board.oob(step):
+                continue
+            cell = board.cells[step.r][step.c]
+            if near_opp and cell.owner_parity != parity:
+                continue
+            if (step.r, step.c) in danger and cell.owner_parity == -parity:
+                continue
+
+            key = (rounds_until, len(path))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_dir = first_dir
+
+        return best_dir
 
     def _check_powerup(self, board, me, parity, danger, near_opp):
         """Step on adjacent powerup if available."""
