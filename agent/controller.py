@@ -1486,9 +1486,6 @@ class PlayerController:
             return None
         actions = []
         stamina = me.stamina
-        if self._can_paint(step_cell, parity) and stamina >= 30:
-            actions.append(Action.Paint(step))
-            stamina -= 15
         actions.append(Action.Move(chase_dir))
 
         # Multi-move #2: keep chasing on our territory
