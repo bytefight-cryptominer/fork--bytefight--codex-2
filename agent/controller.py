@@ -818,6 +818,31 @@ class PlayerController:
     def _overlay_target_dist(self, loc, target):
         return min(abs(loc.r - r) + abs(loc.c - c) for r, c in target)
 
+    def _overlay_should_trigger(self, board, me, parity, target, threat_dist):
+        if not target:
+            return False
+        if self._overlay_target_dist(me.loc, target) > 2:
+            return False
+        if me.stamina < 40:
+            return False
+
+        my_count, opp_count = self._overlay_target_counts(board, parity, target)
+        total = len(target)
+        threshold = math.ceil(total * GameConstants.HILL_CONTROL_THRESHOLD)
+        mine_captured = my_count >= threshold and my_count > opp_count
+
+        if mine_captured and opp_count == 0:
+            return False
+        if mine_captured and (my_count - opp_count) > 1:
+            return False
+        if my_count >= threshold and opp_count == 0 and threat_dist > 4:
+            return False
+        if opp_count == 0 and my_count >= threshold:
+            return False
+        if opp_count == 0 and threat_dist > 6:
+            return False
+        return True
+
     def _overlay_candidate_actions(self, board, parity, target):
         me = board.get_player(parity)
         current_dist = self._overlay_target_dist(me.loc, target)
@@ -880,22 +905,17 @@ class PlayerController:
         return score
 
     def _hill_tactical_overlay(self, board, me, opp, parity, target, danger, threat_dist, time_left_now):
-        if not target:
-            return None
-        if self._overlay_target_dist(me.loc, target) > 3:
-            return None
-        if threat_dist > 8:
-            return None
-        if me.stamina < 25:
+        if not self._overlay_should_trigger(board, me, parity, target, threat_dist):
             return None
 
         unsafe = self._build_unsafe_overlay_cells(board, parity, opp, danger)
-        deadline = time_module.perf_counter() + min(0.008, max(0.003, time_left_now / 20000.0))
+        deadline = time_module.perf_counter() + min(0.004, max(0.0015, time_left_now / 40000.0))
         beam = [(board.get_copy(), [], -1e18)]
         best_actions = None
         best_score = -1e18
+        best_board = None
 
-        for _ in range(4):
+        for _ in range(3):
             if time_module.perf_counter() >= deadline:
                 break
             next_beam = []
@@ -911,15 +931,21 @@ class PlayerController:
                     if score > best_score:
                         best_score = score
                         best_actions = new_actions
+                        best_board = copy
                     if len(new_actions) < 4:
                         next_beam.append((copy, new_actions, score))
             if not next_beam:
                 break
             next_beam.sort(key=lambda item: -item[2])
-            beam = next_beam[:8]
+            beam = next_beam[:5]
 
-        if best_score >= 25.0 and best_actions:
-            return best_actions
+        if best_score >= 60.0 and best_actions and best_board is not None:
+            root_my_target, root_opp_target = self._overlay_target_counts(board, parity, target)
+            best_my_target, best_opp_target = self._overlay_target_counts(best_board, parity, target)
+            improved_target = (best_my_target > root_my_target) or (best_opp_target < root_opp_target)
+            improved_hill = len(best_board.get_player(parity).controlled_hills) > len(board.get_player(parity).controlled_hills)
+            if improved_target or improved_hill:
+                return best_actions
         return None
 
     def play(
